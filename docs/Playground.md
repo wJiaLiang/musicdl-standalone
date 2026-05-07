@@ -13,7 +13,17 @@
 #### Music downloader GUI
 
 This project is located in the [musicdlgui](https://github.com/CharlesPikachu/musicdl/tree/master/examples/examples/musicdlgui) directory. 
-To use it, run `python musicdlgui.py`. The result is shown below:
+The GUI provides source selection, keyword search, a custom download directory, a filename template, download records, and a local player for downloaded audio files.
+
+To use it on Windows with the recommended local environment, run:
+
+```powershell
+uv pip install -e .
+uv pip install -r examples\musicdlgui\requirements.txt
+uv run python examples\musicdlgui\musicdlgui.py
+```
+
+The result is shown below:
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/CharlesPikachu/musicdl/master/examples/musicdlgui/screenshot.png" width="600" alt="musicdl logo" />
