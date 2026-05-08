@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -269,6 +270,13 @@ class MusicdlGUI(QMainWindow):
         self.music_client: musicdl.MusicClient | None = None
         self.slider_pressed = False
         self.current_play_file_path: str = ''
+        self.playback_mode_index = 2
+        self.playback_modes = ['single_once', 'single_loop', 'list_loop']
+        self.playback_mode_labels = {
+            'single_once': '单曲播放',
+            'single_loop': '单曲循环',
+            'list_loop': '列表循环',
+        }
         self.download_dir = os.path.abspath('musicdl_outputs')
         self.setWindowTitle('musicdl 桌面音乐下载器')
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'icon.ico')))
@@ -424,7 +432,10 @@ class MusicdlGUI(QMainWindow):
         self.now_playing_label = QLabel('未播放')
         self.now_playing_label.setObjectName('NowPlaying')
         self.playlist_widget = QListWidget()
+        self.playlist_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.playlist_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlist_widget.itemDoubleClicked.connect(self.play_playlist_item)
+        self.playlist_widget.customContextMenuRequested.connect(self.open_playlist_menu)
 
         controls = QHBoxLayout()
         self.prev_button = QPushButton()
@@ -433,9 +444,16 @@ class MusicdlGUI(QMainWindow):
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.next_button = QPushButton()
         self.next_button.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipForward))
+        self.playback_mode_combo = QComboBox()
+        for mode in self.playback_modes:
+            self.playback_mode_combo.addItem(self.playback_mode_labels[mode], mode)
+        self.playback_mode_combo.setCurrentIndex(self.playback_mode_index)
+        self.playback_mode_combo.currentIndexChanged.connect(self.change_playback_mode)
+        self.update_playback_mode_control()
         controls.addWidget(self.prev_button)
         controls.addWidget(self.play_button)
         controls.addWidget(self.next_button)
+        controls.addWidget(self.playback_mode_combo)
 
         self.position_slider = QSlider(Qt.Horizontal)
         self.position_slider.sliderPressed.connect(self._on_slider_pressed)
@@ -453,8 +471,12 @@ class MusicdlGUI(QMainWindow):
         self.add_files_button = QPushButton('添加文件')
         self.add_files_button.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
         self.add_files_button.clicked.connect(self.add_audio_files)
+        self.remove_playlist_button = QPushButton('移除选中')
+        self.remove_playlist_button.setIcon(self.style().standardIcon(QStyle.SP_DialogDiscardButton))
+        self.remove_playlist_button.clicked.connect(self.remove_selected_playlist_items)
         player_actions.addWidget(self.scan_button)
         player_actions.addWidget(self.add_files_button)
+        player_actions.addWidget(self.remove_playlist_button)
 
         layout.addWidget(self.now_playing_label)
         layout.addWidget(self.playlist_widget, 1)
@@ -486,13 +508,14 @@ class MusicdlGUI(QMainWindow):
         '''初始化 QtMultimedia 播放器和相关信号。'''
         if not MULTIMEDIA_AVAILABLE:
             self.set_status('当前 PyQt5 环境缺少 QtMultimedia，播放器已禁用')
-            for widget in [self.prev_button, self.play_button, self.next_button, self.position_slider, self.volume_slider, self.scan_button, self.add_files_button]:
+            for widget in [self.prev_button, self.play_button, self.next_button, self.playback_mode_combo, self.position_slider, self.volume_slider, self.scan_button, self.add_files_button, self.remove_playlist_button]:
                 widget.setEnabled(False)
             return
         self.player = QMediaPlayer(self)
         self.playlist = QMediaPlaylist(self)
         self.player.setPlaylist(self.playlist)
         self.player.setVolume(self.volume_slider.value())
+        self.apply_playback_mode()
         self.prev_button.clicked.connect(self.playlist.previous)
         self.next_button.clicked.connect(self.playlist.next)
         self.play_button.clicked.connect(self.toggle_playback)
@@ -502,6 +525,41 @@ class MusicdlGUI(QMainWindow):
         self.player.stateChanged.connect(self.update_play_button)
         self.player.error.connect(self.handle_player_error)
         self.playlist.currentIndexChanged.connect(self.update_playlist_selection)
+
+    def current_playback_mode(self) -> str:
+        '''返回当前播放器模式键名。'''
+        if hasattr(self, 'playback_mode_combo'):
+            selected_mode = self.playback_mode_combo.currentData()
+            if selected_mode in self.playback_modes:
+                return selected_mode
+        return self.playback_modes[self.playback_mode_index]
+
+    def update_playback_mode_control(self) -> None:
+        '''根据当前播放模式刷新按钮文案和提示。'''
+        mode = self.current_playback_mode()
+        label = self.playback_mode_labels[mode]
+        self.playback_mode_index = self.playback_modes.index(mode)
+        self.playback_mode_combo.setToolTip(f'当前播放模式：{label}')
+
+    def apply_playback_mode(self) -> None:
+        '''把当前播放模式应用到 Qt 播放列表。'''
+        if not MULTIMEDIA_AVAILABLE:
+            return
+        mode_map = {
+            'single_once': QMediaPlaylist.CurrentItemOnce,
+            'single_loop': QMediaPlaylist.CurrentItemInLoop,
+            'list_loop': QMediaPlaylist.Loop,
+        }
+        self.playlist.setPlaybackMode(mode_map[self.current_playback_mode()])
+
+    def change_playback_mode(self, index: int) -> None:
+        '''在单曲播放、单曲循环和列表循环之间切换。'''
+        if index < 0:
+            return
+        self.playback_mode_index = index
+        self.update_playback_mode_control()
+        self.apply_playback_mode()
+        self.set_status(f'播放模式：{self.playback_mode_labels[self.current_playback_mode()]}')
 
     def _apply_style(self) -> None:
         '''应用桌面端现代化视觉样式。'''
@@ -782,6 +840,52 @@ class MusicdlGUI(QMainWindow):
         if self.playlist.mediaCount() == 1:
             self.playlist.setCurrentIndex(0)
 
+    def open_playlist_menu(self, position) -> None:
+        '''显示播放列表右键菜单，提供仅从列表移除的操作。'''
+        item = self.playlist_widget.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.playlist_widget.setCurrentItem(item)
+        menu = QMenu(self)
+        remove_action = menu.addAction('从列表移除')
+        action = menu.exec_(self.playlist_widget.viewport().mapToGlobal(position))
+        if action == remove_action:
+            self.remove_selected_playlist_items()
+
+    def remove_selected_playlist_items(self) -> None:
+        '''移除播放列表中选中的曲目，只更新列表，不删除本地文件。'''
+        rows = [index.row() for index in self.playlist_widget.selectedIndexes()]
+        removed_count = self.remove_playlist_rows(rows)
+        if removed_count > 0:
+            self.set_status(f'已从播放列表移除 {removed_count} 首，文件未删除')
+
+    def remove_playlist_rows(self, rows: list[int]) -> int:
+        '''按行号移除播放列表曲目，返回实际移除数量。'''
+        if not MULTIMEDIA_AVAILABLE:
+            return 0
+        valid_rows = sorted({
+            row for row in rows
+            if 0 <= row < self.playlist_widget.count()
+        }, reverse=True)
+        if not valid_rows:
+            return 0
+        current_index = self.playlist.currentIndex()
+        if current_index in valid_rows:
+            self.player.stop()
+        for row in valid_rows:
+            self.playlist.removeMedia(row)
+            item = self.playlist_widget.takeItem(row)
+            del item
+        if self.playlist.mediaCount() == 0:
+            self.now_playing_label.setText('未播放')
+            self.current_play_file_path = ''
+            self.position_slider.setValue(0)
+            self.time_label.setText('00:00 / 00:00')
+        elif current_index in valid_rows:
+            self.playlist.setCurrentIndex(min(current_index, self.playlist.mediaCount() - 1))
+        return len(valid_rows)
+
     def _autoload_existing_downloads(self) -> None:
         '''程序启动时自动加载历史下载歌曲到本地播放列表。'''
         if not MULTIMEDIA_AVAILABLE:
@@ -926,16 +1030,32 @@ class MusicdlGUI(QMainWindow):
         if MULTIMEDIA_AVAILABLE:
             self.player.setPosition(self.position_slider.value())
 
+    def shutdown_player(self) -> None:
+        '''快速释放播放器资源，减少窗口关闭时的多媒体后端阻塞。'''
+        if not MULTIMEDIA_AVAILABLE:
+            return
+        self.player.blockSignals(True)
+        if self.player.state() != QMediaPlayer.StoppedState:
+            self.player.stop()
+        self.player.setPlaylist(None)
+
+    def shutdown_thread(self, thread: QThread | None, timeout_ms: int = 80) -> None:
+        '''请求后台线程退出，短暂等待后强制终止，避免关闭窗口长时间卡顿。'''
+        if not thread or not thread.isRunning():
+            return
+        thread.requestInterruption()
+        thread.quit()
+        if thread.wait(timeout_ms):
+            return
+        thread.terminate()
+        thread.wait(timeout_ms)
+
     def closeEvent(self, event) -> None:
         '''关闭窗口时停止后台线程和播放器。'''
-        if MULTIMEDIA_AVAILABLE:
-            self.player.stop()
+        self.hide()
+        self.shutdown_player()
         for thread in [self.search_thread, self.download_thread, self.playlist_scan_thread]:
-            if thread and thread.isRunning():
-                thread.quit()
-                if not thread.wait(250):
-                    thread.terminate()
-                    thread.wait(250)
+            self.shutdown_thread(thread)
         super().closeEvent(event)
 
 

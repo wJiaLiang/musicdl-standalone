@@ -24,12 +24,31 @@
 - `uv` 优先用于创建虚拟环境、安装依赖和执行命令
 - 项目当前仍使用 `setup.py` / `requirements.txt` 风格管理 Python 包
 
-推荐初始化命令：
+## 常用命令
+
+创建虚拟环境：
 
 ```powershell
 cd D:\Projects\opensource\musicdl
 uv venv
+```
+
+安装主项目依赖和 editable 包：
+
+```powershell
 uv pip install -e .
+```
+
+安装 GUI 依赖：
+
+```powershell
+uv pip install -r examples\musicdlgui\requirements.txt
+```
+
+安装 exe 打包工具：
+
+```powershell
+uv pip install pyinstaller
 ```
 
 启动命令行主程序：
@@ -55,6 +74,26 @@ uv run musicdl -k "周杰伦" -m "NeteaseMusicClient,QQMusicClient,KuwoMusicClie
 ```powershell
 uv run musicdl -p "https://music.163.com/#/playlist?id=7583298906" -m "NeteaseMusicClient"
 ```
+
+启动 GUI：
+
+```powershell
+uv run python examples\musicdlgui\musicdlgui.py
+```
+
+推荐使用 spec 打包 GUI exe：
+
+```powershell
+uv run pyinstaller --clean -y musicdlgui.spec
+```
+
+打包产物默认位于：
+
+```powershell
+dist\musicdlgui.exe
+```
+
+注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包和资源未被完整收集。
 
 ## 技术栈
 
@@ -90,13 +129,12 @@ uv run musicdl -p "https://music.163.com/#/playlist?id=7583298906" -m "NeteaseMu
 - `docs`：用户文档。
 - `scripts`：辅助脚本。
 
-运行生成目录：
+运行生成目录通常不应纳入代码变更：
 
 - `musicdl_outputs`：默认下载和搜索结果输出目录。
 - `.venv`：本地虚拟环境。
 - `musicdl.egg-info`：本地 editable 安装生成目录。
-
-这些运行产物通常不应纳入代码变更。
+- `build`、`dist`：打包生成目录。
 
 ## 架构约定
 
@@ -158,6 +196,7 @@ uv run musicdl -p "https://music.163.com/#/playlist?id=7583298906" -m "NeteaseMu
 
 ```powershell
 cd D:\Projects\opensource\musicdl
+uv venv
 uv pip install -e .
 uv pip install -r examples\musicdlgui\requirements.txt
 uv run python examples\musicdlgui\musicdlgui.py
@@ -166,15 +205,15 @@ uv run python examples\musicdlgui\musicdlgui.py
 注意：
 
 - GUI 只是示例，不是主项目架构核心。
-- 示例下载逻辑较旧，直接 `requests.get(song_info['download_url'])`，无法完整覆盖 HLS、Apple、TIDAL、YouTube 自定义流对象、预下载字节等情况。
-- 若维护 GUI，建议改为调用 `MusicClient.download([song_info])`，复用核心下载逻辑。
+- 示例应优先调用 `MusicClient.download([song_info])`，复用核心下载逻辑。
+- 右侧播放器基于 QtMultimedia，支持单曲播放、单曲循环和列表循环三种播放模式。
 
 ## 测试与验证
 
 当前仓库没有完整自动化测试套件。修改后至少做以下验证：
 
 ```powershell
-uv run python -m compileall musicdl
+uv run python -m compileall musicdl examples\musicdlgui
 ```
 
 针对 CLI 入口：
@@ -204,30 +243,24 @@ uv run musicdl -k "test" -m "KuwoMusicClient"
 entry_points={'console_scripts': ['musicdl = musicdl.musicdl:MusicClientCMD']}
 ```
 
-常规本地安装：
+GUI 示例如需打包为 exe，先安装依赖：
 
 ```powershell
 uv pip install -e .
-```
-
-GUI 示例如需打包，可使用 PyInstaller，但打包前应先修复 GUI 示例中与当前核心 API 不一致的部分，并确认版权和 LICENSE 限制。
-
-参考命令：
-
-```powershell
+uv pip install -r examples\musicdlgui\requirements.txt
 uv pip install pyinstaller
-uv run pyinstaller `
-  --noconsole `
-  --onefile `
-  --icon examples\musicdlgui\icon.ico `
-  --add-data "examples\musicdlgui\icon.ico;." `
-  examples\musicdlgui\musicdlgui.py
 ```
 
-启动速度优先（推荐 `onedir`）：
+推荐使用 `musicdlgui.spec`：
 
 ```powershell
 uv run pyinstaller --clean -y musicdlgui.spec
+```
+
+输出文件：
+
+```powershell
+dist\musicdlgui.exe
 ```
 
 注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包未被完整收集。
