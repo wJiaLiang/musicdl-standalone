@@ -81,7 +81,7 @@ uv run musicdl -p "https://music.163.com/#/playlist?id=7583298906" -m "NeteaseMu
 uv run python examples\musicdlgui\musicdlgui.py
 ```
 
-推荐使用 spec 打包 GUI exe：
+打包 GUI exe，是用下面命令:
 
 ```powershell
 uv run pyinstaller --clean -y musicdlgui.spec
@@ -92,8 +92,6 @@ uv run pyinstaller --clean -y musicdlgui.spec
 ```powershell
 dist\musicdlgui.exe
 ```
-
-注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包和资源未被完整收集。
 
 ## 技术栈
 
@@ -251,7 +249,7 @@ uv pip install -r examples\musicdlgui\requirements.txt
 uv pip install pyinstaller
 ```
 
-推荐使用 `musicdlgui.spec`：
+打包GUI exe，包 使用 `musicdlgui.spec`：
 
 ```powershell
 uv run pyinstaller --clean -y musicdlgui.spec
@@ -263,7 +261,7 @@ uv run pyinstaller --clean -y musicdlgui.spec
 dist\musicdlgui.exe
 ```
 
-注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包未被完整收集。
+重点注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包未被完整收集。
 
 ## 文档维护
 

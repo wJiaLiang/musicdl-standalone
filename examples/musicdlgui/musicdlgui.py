@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Any
 if sys.platform.startswith('win'):
     os.environ.setdefault('QT_MULTIMEDIA_PREFERRED_PLUGINS', 'windowsmediafoundation')
 
-from PyQt5.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QCursor, QFont, QIcon
 try:
     from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer, QMediaPlaylist
@@ -277,13 +278,17 @@ class MusicdlGUI(QMainWindow):
             'single_loop': '单曲循环',
             'list_loop': '列表循环',
         }
-        self.download_dir = os.path.abspath('musicdl_outputs')
+        self.settings = QSettings('musicdl', 'musicdlgui')
+        self.download_dir = self.settings.value('download_dir', os.path.abspath('musicdl_outputs'), type=str)
+        self.filename_template = self.settings.value('filename_template', DEFAULT_FILENAME_TEMPLATE, type=str)
         self.setWindowTitle('musicdl 桌面音乐下载器')
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'icon.ico')))
         self.resize(1240, 760)
         self._setup_ui()
         self._setup_player()
         self._apply_style()
+        self.load_download_records()
+        # 启动时自动扫描下载目录
         QTimer.singleShot(150, self._autoload_existing_downloads)
 
     def _setup_ui(self) -> None:
@@ -369,8 +374,9 @@ class MusicdlGUI(QMainWindow):
         dir_layout = QHBoxLayout()
         dir_layout.addWidget(self.download_dir_edit, 1)
         dir_layout.addWidget(choose_dir_button)
-        self.filename_template_edit = QLineEdit(DEFAULT_FILENAME_TEMPLATE)
+        self.filename_template_edit = QLineEdit(self.filename_template)
         self.filename_template_edit.setPlaceholderText(DEFAULT_FILENAME_TEMPLATE)
+        self.filename_template_edit.textChanged.connect(self.save_filename_template)
         settings_layout.addWidget(QLabel('基础目录'))
         settings_layout.addLayout(dir_layout)
         settings_layout.addWidget(QLabel('文件名模板'))
@@ -416,6 +422,8 @@ class MusicdlGUI(QMainWindow):
         self.download_table.verticalHeader().setVisible(False)
         self.download_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.download_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.download_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.download_table.customContextMenuRequested.connect(self.open_download_menu)
         self.download_table.doubleClicked.connect(self.play_selected_download)
 
         layout.addWidget(QLabel('搜索结果'))
@@ -665,7 +673,22 @@ class MusicdlGUI(QMainWindow):
             return
         self.download_dir = directory
         self.download_dir_edit.setText(directory)
+        self.settings.setValue('download_dir', directory)
+        self.settings.sync()
         self.set_status(f'下载目录已设置为：{directory}')
+
+    def _autoload_existing_downloads(self) -> None:
+        '''程序启动时自动扫描历史下载音乐，同时加入播放列表和下载记录。'''
+        if not MULTIMEDIA_AVAILABLE:
+            return
+        self._scan_playlist_files(autoload=True)
+
+    def save_filename_template(self) -> None:
+        '''保存文件名模板到持久化配置。'''
+        template = self.filename_template_edit.text().strip()
+        if template:
+            self.settings.setValue('filename_template', template)
+            self.settings.sync()
 
     def search(self) -> None:
         '''根据关键词和平台选择启动后台搜索。'''
@@ -752,7 +775,7 @@ class MusicdlGUI(QMainWindow):
         keyword = self.keyword_edit.text().strip() or 'downloads'
         self.download_button.setEnabled(False)
         self.set_status('正在启动下载任务...', busy=True)
-        self.append_download_rows(song_infos, '等待下载')
+        self.append_download_rows(song_infos, '下载中')
         self.download_thread = QThread(self)
         self.download_worker = DownloadWorker(song_infos, keyword, sources, self.download_dir, template)
         self.download_worker.moveToThread(self.download_thread)
@@ -783,6 +806,7 @@ class MusicdlGUI(QMainWindow):
         for song_info in valid_songs:
             self.upsert_download_record(song_info)
             self.add_to_playlist(song_info.save_path, song_info)
+        self.save_download_records()
         self.set_status(f'下载完成，成功 {len(valid_songs)} 首')
         if not valid_songs:
             QMessageBox.warning(self, '下载完成', '没有成功写入的音乐文件，请查看终端日志了解失败原因。')
@@ -800,12 +824,12 @@ class MusicdlGUI(QMainWindow):
         self.fill_download_record(row, song_info)
 
     def upsert_download_record(self, song_info: SongInfo) -> None:
-        '''优先更新等待中的下载记录，找不到时追加新记录。'''
+        '''优先更新下载中的记录，找不到时追加新记录。'''
         for row in range(self.download_table.rowCount()):
             same_song = self.download_table.item(row, 0) and self.download_table.item(row, 0).text() == short_text(song_info.song_name, 80)
             same_source = self.download_table.item(row, 2) and self.download_table.item(row, 2).text() == short_text(song_info.source, 80)
-            pending = self.download_table.item(row, 3) and self.download_table.item(row, 3).text() == '等待下载'
-            if same_song and same_source and pending:
+            downloading = self.download_table.item(row, 3) and self.download_table.item(row, 3).text() == '下载中'
+            if same_song and same_source and downloading:
                 self.fill_download_record(row, song_info)
                 return
         self.add_download_record(song_info)
@@ -819,6 +843,71 @@ class MusicdlGUI(QMainWindow):
             item.setData(Qt.UserRole, song_info.save_path)
             self.download_table.setItem(row, column, item)
 
+    def save_download_records(self) -> None:
+        '''把下载记录表持久化保存到 QSettings。'''
+        records: list[dict] = []
+        for row in range(self.download_table.rowCount()):
+            path_item = self.download_table.item(row, 4)
+            if not path_item:
+                continue
+            save_path = stringify(path_item.data(Qt.UserRole), '')
+            if save_path and os.path.exists(save_path):
+                song_name = stringify(self.download_table.item(row, 0).text()) if self.download_table.item(row, 0) else ''
+                singers = stringify(self.download_table.item(row, 1).text()) if self.download_table.item(row, 1) else ''
+                source = stringify(self.download_table.item(row, 2).text()) if self.download_table.item(row, 2) else ''
+                records.append({
+                    'save_path': save_path,
+                    'song_name': song_name,
+                    'singers': singers,
+                    'source': source,
+                })
+        self.settings.setValue('download_records', records)
+        self.settings.sync()
+
+    def load_download_records(self) -> None:
+        '''从 QSettings 加载历史下载记录到下载记录表。'''
+        records = self.settings.value('download_records', [], type=list)
+        for record in records:
+            save_path = stringify(record.get('save_path', ''))
+            if not save_path or not os.path.exists(save_path):
+                continue
+            row = self.download_table.rowCount()
+            self.download_table.insertRow(row)
+            values = [
+                stringify(record.get('song_name', Path(save_path).stem)),
+                stringify(record.get('singers', '')),
+                stringify(record.get('source', 'Unknown')),
+                '已下载',
+                save_path,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(short_text(value, 120))
+                item.setToolTip(stringify(value, ''))
+                item.setData(Qt.UserRole, save_path)
+                self.download_table.setItem(row, column, item)
+
+    def open_download_menu(self, position) -> None:
+        '''显示下载记录右键菜单，支持删除记录。'''
+        item = self.download_table.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.download_table.setCurrentItem(item)
+        menu = QMenu(self)
+        remove_action = menu.addAction('删除记录')
+        action = menu.exec_(self.download_table.viewport().mapToGlobal(position))
+        if action == remove_action:
+            self.remove_selected_download_records()
+
+    def remove_selected_download_records(self) -> None:
+        '''从下载记录表中删除选中的行，仅移除表格记录，不删除本地文件。'''
+        rows = sorted({index.row() for index in self.download_table.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            self.download_table.removeRow(row)
+        if rows:
+            self.save_download_records()
+            self.set_status(f'已删除 {len(rows)} 条下载记录')
+
     def add_to_playlist(self, file_path: str, song_info: SongInfo | None = None) -> None:
         '''把本地音频文件加入播放器列表。'''
         if not MULTIMEDIA_AVAILABLE or not file_path or not os.path.exists(file_path):
@@ -829,9 +918,24 @@ class MusicdlGUI(QMainWindow):
         }
         if file_path in existing_paths:
             return
-        title = stringify(getattr(song_info, 'song_name', None), Path(file_path).stem)
+        if song_info is not None and getattr(song_info, 'song_name', None):
+            title = stringify(song_info.song_name)
+        else:
+            stem = Path(file_path).stem
+            title = re.sub(r'\s*-\s*[a-zA-Z0-9]+$', '', stem).strip()
+            if not title:
+                title = stem
         singers = stringify(getattr(song_info, 'singers', None), '')
         label = f'{title} - {singers}' if singers else title
+        existing_labels = {
+            self.playlist_widget.item(i).text()
+            for i in range(self.playlist_widget.count())
+        }
+        base_label = label
+        duplicate_idx = 1
+        while label in existing_labels:
+            label = f'{base_label} ({duplicate_idx})'
+            duplicate_idx += 1
         item = QListWidgetItem(label)
         item.setToolTip(file_path)
         item.setData(Qt.UserRole, file_path)
@@ -886,21 +990,15 @@ class MusicdlGUI(QMainWindow):
             self.playlist.setCurrentIndex(min(current_index, self.playlist.mediaCount() - 1))
         return len(valid_rows)
 
-    def _autoload_existing_downloads(self) -> None:
-        '''程序启动时自动加载历史下载歌曲到本地播放列表。'''
-        if not MULTIMEDIA_AVAILABLE:
-            return
-        self._scan_playlist_files(autoload=True)
-
     def scan_download_dir(self) -> None:
-        '''扫描当前下载目录下的音频文件并加入播放列表。'''
+        '''扫描当前下载目录下的音频文件并加入播放列表和下载记录。'''
         if not Path(self.download_dir).exists():
             QMessageBox.information(self, '目录不存在', '当前下载目录不存在。')
             return
         self._scan_playlist_files(autoload=False)
 
     def _scan_playlist_files(self, autoload: bool) -> None:
-        '''启动后台线程扫描音频文件，并在完成后批量加入播放列表。'''
+        '''启动后台线程扫描音频文件，并在完成后批量加入播放列表和下载记录。'''
         if self.playlist_scan_thread and self.playlist_scan_thread.isRunning():
             return
         self.set_status('正在扫描本地音乐...', busy=True)
@@ -916,12 +1014,16 @@ class MusicdlGUI(QMainWindow):
         self.playlist_scan_thread.start()
 
     def _on_playlist_scan_finished(self, files: list[str], autoload: bool) -> None:
-        '''处理扫描结果并将音频加入播放列表。'''
+        '''处理扫描结果并将音频加入播放列表和下载记录。'''
         added_count = 0
         for file_path in files:
             before = self.playlist_widget.count()
             self.add_to_playlist(file_path)
+            # 同时添加到下载记录（如果还没有的话）
+            self._add_path_to_download_records(file_path)
             added_count += 1 if self.playlist_widget.count() > before else 0
+        # 保存下载记录
+        self.save_download_records()
         if autoload:
             self.set_status(f'已自动加载 {added_count} 首历史下载音乐' if added_count > 0 else '已就绪')
         else:
@@ -930,6 +1032,30 @@ class MusicdlGUI(QMainWindow):
     def _on_playlist_scan_failed(self, error: str) -> None:
         '''处理扫描失败并显示状态。'''
         self.set_status(f'扫描失败：{error}')
+
+    def _add_path_to_download_records(self, file_path: str) -> None:
+        '''把单个文件路径添加到下载记录表（如果还没有的话）。'''
+        existing_paths = {
+            self.download_table.item(row, 4).data(Qt.UserRole)
+            for row in range(self.download_table.rowCount())
+            if self.download_table.item(row, 4)
+        }
+        if file_path in existing_paths:
+            return
+        row = self.download_table.rowCount()
+        self.download_table.insertRow(row)
+        values = [
+            Path(file_path).stem,
+            '',
+            '本地文件',
+            '已下载',
+            file_path,
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(short_text(value, 120))
+            item.setToolTip(stringify(value, ''))
+            item.setData(Qt.UserRole, file_path)
+            self.download_table.setItem(row, column, item)
 
     def add_audio_files(self) -> None:
         '''通过文件选择框向播放列表添加本地音频文件。'''
@@ -941,7 +1067,9 @@ class MusicdlGUI(QMainWindow):
         )
         for file_path in files:
             self.add_to_playlist(file_path)
+            self._add_path_to_download_records(file_path)
         if files:
+            self.save_download_records()
             self.set_status(f'已加入 {len(files)} 个文件')
 
     def play_selected_download(self) -> None:
