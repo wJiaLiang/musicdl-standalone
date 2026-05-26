@@ -23,7 +23,7 @@ from fake_useragent import UserAgent
 from pathvalidate import sanitize_filepath
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn, MofNCompleteColumn, ProgressColumn, Task
-from ..utils import LoggerHandle, AudioLinkTester, SongInfo, SongInfoUtils, HLSDownloader, IOUtils, usedownloadheaderscookies, usesearchheaderscookies, useparseheaderscookies, cookies2dict, cookies2string, optionalimport, optionalimportfrom
+from ..utils import LoggerHandle, AudioLinkTester, SongInfo, SongInfoUtils, HLSDownloader, IOUtils, usedownloadheaderscookies, usesearchheaderscookies, useparseheaderscookies, cookies2dict, cookies2string, optionalimport, optionalimportfrom, get_default_work_dir
 
 
 '''AudioAwareColumn'''
@@ -42,9 +42,15 @@ class AudioAwareColumn(ProgressColumn):
 '''BaseMusicClient'''
 class BaseMusicClient():
     source = 'BaseMusicClient'
-    def __init__(self, search_size_per_source: int = 5, auto_set_proxies: bool = False, random_update_ua: bool = False, enable_search_curl_cffi: bool = False, enable_parse_curl_cffi: bool = False, enable_download_curl_cffi: bool = False, maintain_session: bool = False, logger_handle: LoggerHandle = None, disable_print: bool = False, work_dir: str = 'musicdl_outputs', 
+    def __init__(self, search_size_per_source: int = 5, auto_set_proxies: bool = False, random_update_ua: bool = False, enable_search_curl_cffi: bool = False, enable_parse_curl_cffi: bool = False, enable_download_curl_cffi: bool = False, maintain_session: bool = False, logger_handle: LoggerHandle = None, disable_print: bool = False, work_dir: str = None, 
                  max_retries: int = 3, freeproxy_settings: dict = None, default_search_cookies: dict | str = None, default_download_cookies: dict | str = None, default_parse_cookies: dict | str = None, strict_limit_search_size_per_page: bool = True, search_size_per_page: int = 10, quark_parser_config: dict = None):
-        # set up work dir
+        # 如果 work_dir 没有传入或者是默认的 'musicdl_outputs'，我们通过运行时检测动态获取绝对路径
+        # 调用关系：调用 get_default_work_dir() 获取依赖于 frozen 状态或开发环境的项目输出目录
+        if (work_dir is None) or (work_dir == 'musicdl_outputs'):
+            # 调用关系：调用 get_default_work_dir() 进行绝对路径探测并赋值给 work_dir 变量
+            work_dir = get_default_work_dir()
+        # 确保下载和输出的物理文件夹存在，没有就创建一个文件夹
+        # 调用关系：调用 IOUtils.touchdir 递归创建目录
         IOUtils.touchdir(work_dir)
         # search size
         self.search_size_per_source = search_size_per_source

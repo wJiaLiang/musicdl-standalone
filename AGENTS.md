@@ -4,7 +4,6 @@
 1. 所有新增的功能，都给我三个完全不同的技术实现方案，每个方案都要写清楚优缺点、长期维护成本、以及潜在的坑。 
 2. 等我选完方案之后，你再给我写完整代码，坚持单一职责原则，每一行都加详细注释。 清晰标记出各函数的调用关系。
 3. 写完代码以后，必须主动给我做三个维度的 Review：可读性、性能、可维护性。
-4. 任务完成之后，就回复“主人，任务已完成”。
 
 ## 项目概览
 
@@ -91,11 +90,6 @@ uv run python examples\musicdlgui\musicdlgui.py
 uv run pyinstaller --clean -y musicdlgui.spec
 ```
 
-打包产物默认位于：
-
-```powershell
-dist\musicdlgui.exe
-```
 
 ## 技术栈
 
@@ -259,11 +253,6 @@ uv pip install pyinstaller
 uv run pyinstaller --clean -y musicdlgui.spec
 ```
 
-输出文件：
-
-```powershell
-dist\musicdlgui.exe
-```
 
 重点注意：不要再用 `uv run pyinstaller ... examples\musicdlgui\musicdlgui.py ...` 这类“脚本参数模式”，会覆盖 `musicdlgui.spec`，导致 `musicdl` 包未被完整收集。
 

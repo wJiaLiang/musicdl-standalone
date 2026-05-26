@@ -7,6 +7,7 @@ WeChat Official Account (微信公众号):
     Charles的皮卡丘
 '''
 import copy
+import importlib
 import collections
 
 
@@ -19,10 +20,19 @@ class BaseModuleBuilder():
         if requires_renew_modules is not None and isinstance(requires_renew_modules, (dict, collections.OrderedDict)):
             for name, module in requires_renew_modules.items(): self.renew(name, module)
         self.validate()
+    def _resolve_module(self, name):
+        entry = self.REGISTERED_MODULES[name]
+        if isinstance(entry, tuple) and len(entry) == 2:
+            module_path, class_name = entry
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name)
+            self.REGISTERED_MODULES[name] = cls
+            return cls
+        return entry
     '''build'''
     def build(self, module_cfg: dict):
         module_type = (module_cfg := copy.deepcopy(module_cfg)).pop('type')
-        module = self.REGISTERED_MODULES[module_type](**module_cfg)
+        module = self._resolve_module(module_type)(**module_cfg)
         return module
     '''register'''
     def register(self, name, module):
@@ -36,7 +46,10 @@ class BaseModuleBuilder():
         self.REGISTERED_MODULES[name] = module
     '''validate'''
     def validate(self):
-        for _, module in self.REGISTERED_MODULES.items():
+        for name, module in self.REGISTERED_MODULES.items():
+            if isinstance(module, tuple) and len(module) == 2:
+                assert isinstance(module[0], str) and isinstance(module[1], str)
+                continue
             assert callable(module)
     '''delete'''
     def delete(self, name):

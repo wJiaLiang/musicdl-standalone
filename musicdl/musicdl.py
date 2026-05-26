@@ -18,10 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
 if __name__ == '__main__':
     from __init__ import __version__
-    from modules import BuildMusicClient, LoggerHandle, MusicClientBuilder, SongInfo, BaseMusicClient, smarttrunctable, colorize, printfullline, cursorpickintable
+    from modules import BuildMusicClient, LoggerHandle, MusicClientBuilder, SongInfo, BaseMusicClient, smarttrunctable, colorize, printfullline, cursorpickintable, get_default_work_dir
 else:
     from .__init__ import __version__
-    from .modules import BuildMusicClient, LoggerHandle, MusicClientBuilder, SongInfo, BaseMusicClient, smarttrunctable, colorize, printfullline, cursorpickintable
+    from .modules import BuildMusicClient, LoggerHandle, MusicClientBuilder, SongInfo, BaseMusicClient, smarttrunctable, colorize, printfullline, cursorpickintable, get_default_work_dir
 
 
 '''settings'''
@@ -60,8 +60,10 @@ class MusicClient():
         self.logger_handle = LoggerHandle(); self.music_clients: dict[str, BaseMusicClient] = dict()
         for music_source in self.music_sources:
             if music_source not in MusicClientBuilder.REGISTERED_MODULES.keys(): continue
+            # 准备初始化配置字典，其中 'work_dir' 参数通过动态路径检测确定
+            # 调用关系：调用 get_default_work_dir() 并将其返回值赋值给 'work_dir' 字段
             init_music_client_cfg = {
-                'search_size_per_source': 5, 'auto_set_proxies': False, 'random_update_ua': False, 'max_retries': 3, 'maintain_session': False, 'logger_handle': self.logger_handle, 'disable_print': True, 'work_dir': 'musicdl_outputs', 'default_search_cookies': {}, 'default_download_cookies': {}, 
+                'search_size_per_source': 5, 'auto_set_proxies': False, 'random_update_ua': False, 'max_retries': 3, 'maintain_session': False, 'logger_handle': self.logger_handle, 'disable_print': True, 'work_dir': get_default_work_dir(), 'default_search_cookies': {}, 'default_download_cookies': {}, 
                 'default_parse_cookies': {}, 'type': music_source, 'search_size_per_page': 10, 'strict_limit_search_size_per_page': True, 'quark_parser_config': {}, 'freeproxy_settings': None, 'enable_download_curl_cffi': False, 'enable_parse_curl_cffi': False, 'enable_search_curl_cffi': False,
             }
             if music_source in {'GDStudioMusicClient', 'XimalayaMusicClient', 'LizhiMusicClient', 'QingtingMusicClient', 'LRTSMusicClient'}: init_music_client_cfg['search_size_per_source'] = 3

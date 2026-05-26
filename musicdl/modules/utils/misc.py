@@ -141,6 +141,41 @@ def searchdictbykey(obj, target_key: str | list | tuple | set) -> list:
     return dedupkeeporder(results)
 
 
+'''get_default_work_dir'''
+def get_default_work_dir(folder_name: str = 'musicdl_outputs') -> str:
+    # 导入 sys 模块，用于获取程序运行时的解释器或打包状态
+    import sys
+    # 判断是否为 PyInstaller 等工具打包后的冻结的可执行文件环境 (frozen state)
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的 exe，则获取当前可执行文件 exe 的绝对路径目录
+        # 调用关系：调用 os.path.abspath 获取绝对路径，再调用 os.path.dirname 获取其父目录
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        # 拼接成当前 exe 同级目录下的 musicdl_outputs 相对文件夹路径
+        # 调用关系：调用 os.path.join 进行跨平台路径拼接
+        outputs_dir = os.path.join(base_dir, folder_name)
+    else:
+        # 如果是 Python 脚本开发环境运行，__file__ 指向当前 misc.py 的绝对路径
+        # 调用关系：调用 os.path.abspath 获取当前 misc.py 绝对路径，再调用 os.path.dirname 获取其父目录
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 由于 misc.py 位于 musicdl/modules/utils/ 目录下，需要连续向上取三级父目录以获取项目根目录
+        # 调用关系：连续三次调用 os.path.dirname
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+        # 根据用户指示，在 Python 脚本开发模式下，默认使用项目根目录下的 dist/musicdl_outputs 目录
+        # 调用关系：调用 os.path.join 将项目根目录、'dist' 目录以及 folder_name 拼接成完整路径
+        outputs_dir = os.path.join(project_root, 'dist', folder_name)
+    
+    # 判断该目录是否存在，若不存在则创建它以加载或初始化该目录
+    # 调用关系：调用 os.path.exists 进行文件/目录存在性检测
+    if not os.path.exists(outputs_dir):
+        # 递归创建不存在的目录路径，确保在读取或加载前该文件夹一定存在
+        # 调用关系：调用 os.makedirs 创建文件夹结构
+        os.makedirs(outputs_dir, exist_ok=True)
+        
+    # 返回合法且绝对化的默认基础目录路径
+    # 调用关系：调用 os.path.abspath 规范化路径并返回给调用者
+    return os.path.abspath(outputs_dir)
+
+
 '''IOUtils'''
 class IOUtils():
     '''touchdir'''

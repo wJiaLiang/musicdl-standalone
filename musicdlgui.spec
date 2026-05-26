@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('musicdl/modules/js/youtube', 'musicdl/modules/js/youtube'), ('musicdl/modules/wvds', 'musicdl/modules/wvds')]
+datas = [('musicdl/modules/js/youtube', 'musicdl/modules/js/youtube'), ('musicdl/modules/wvds', 'musicdl/modules/wvds'), ('examples/musicdlgui/icon.ico', '.')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('musicdl')
@@ -26,10 +26,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name='musicdlgui',
+    exclude_binaries=True,
+    name='musicdl_gui',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -43,4 +42,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['examples\\musicdlgui\\icon.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='musicdl_gui',
 )

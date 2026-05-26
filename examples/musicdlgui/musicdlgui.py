@@ -46,6 +46,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -59,7 +60,8 @@ from PyQt5.QtWidgets import (
 
 from musicdl import musicdl
 from musicdl.modules import MusicClientBuilder, SongInfo
-from musicdl.modules.utils.misc import IOUtils, legalizestring, sanitize_filename, sanitize_filepath
+from musicdl.modules.utils.logger import LoggerHandle
+from musicdl.modules.utils.misc import IOUtils, legalizestring, sanitize_filename, sanitize_filepath, get_default_work_dir
 
 
 DEFAULT_SOURCES = [
@@ -236,27 +238,219 @@ class DownloadWorker(QObject):
 
 class PlaylistScanWorker(QObject):
     '''后台扫描下载目录下音频文件，避免阻塞 GUI 启动。'''
-    finished = pyqtSignal(list)
+    # 变更为发射文件列表与是否自动加载的标志，规避 lambda 的直接跨线程访问问题
+    finished = pyqtSignal(list, bool)
     failed = pyqtSignal(str)
 
-    def __init__(self, base_dir: str):
+    def __init__(self, base_dir: str, autoload: bool):
         super().__init__()
+        # 初始化保存下载根目录路径
         self.base_dir = base_dir
+        # 初始化保存是否为程序启动自动加载
+        self.autoload = autoload
 
     def run(self) -> None:
         '''扫描音频文件并返回文件路径列表。'''
         try:
             base_path = Path(self.base_dir)
             if not base_path.exists():
-                self.finished.emit([])
+                # 若目录不存在，安全触发 finished 信号，返回空列表及原自动加载属性
+                self.finished.emit([], self.autoload)
                 return
+            # 递归检索所有符合 VALID_AUDIO_SUFFIXES 支持的音频格式的本地文件路径
             files = [
                 str(path) for path in base_path.rglob('*')
                 if path.is_file() and path.suffix.lower() in VALID_AUDIO_SUFFIXES
             ]
-            self.finished.emit(files)
+            # 检索完成后安全发射 finished 信号，传递找到的文件列表和原自动加载属性
+            self.finished.emit(files, self.autoload)
         except Exception as err:
+            # 异常时发射 failed 信号将报错信息传递至主线程
             self.failed.emit(str(err))
+
+
+class LogWindow(QWidget):
+    '''
+    日志显示窗口类，继承自 QWidget，负责增量读取并滚动展示 musicdl 系统运行日志。
+    使用经典终端黑底绿字样式，并利用 QTimer 在显示状态下轮询日志文件。
+    '''
+    def __init__(self, parent=None):
+        # 调用父类构造函数进行初始化
+        super(LogWindow, self).__init__(parent)
+        self.log_file_path = LoggerHandle.log_file_path  # 绑定底层 logger.py 自动生成的物理日志路径
+        self._file_offset = 0  # 文件字节读取偏移量指针，记录增量读取状态
+        self.setAttribute(Qt.WA_DeleteOnClose)  # 关闭窗口时自动彻底销毁 C++ 与 Python 实例以释放内存
+        self.resize(900, 400)  # 设定日志窗口默认宽高为 900 * 400 像素，优化首屏阅读视野
+        self._setup_ui()  # 初始化日志窗口控件架构与样式
+        self._setup_timer()  # 启动 QTimer 开启增量检查轮询
+        self.read_log_incremental(first_load=True)  # 首次呈现日志，防卡顿截断读取最近历史内容
+
+    def _setup_ui(self) -> None:
+        '''
+        创建日志视窗中所需的布局及全部交互按钮。
+        调用关系：由构造函数 __init__ 自动执行以实现界面搭建。
+        '''
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # 创建用于日志展示的多行纯文本只读编辑框
+        self.log_edit = QPlainTextEdit(self)
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMaximumBlockCount(8000)  # 最大缓存 8000 行，多余部分自动丢弃保护内存
+
+        # 纯黑极简现代命令行风格配色样式
+        self.log_edit.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #121212;
+                color: #00ff66;
+                font-family: 'Consolas', 'Courier New', 'Monospace', 'Microsoft YaHei UI';
+                font-size: 13px;
+                border: 1px solid #2e2e2e;
+                border-radius: 6px;
+            }
+        """)
+        layout.addWidget(self.log_edit)
+
+        # 底部控制工具条
+        toolbar = QHBoxLayout()
+
+        # 清空当前终端视窗展示的日志文本
+        self.clear_btn = QPushButton('清空显示', self)
+        self.clear_btn.setStyleSheet("""
+            QPushButton {
+                background: #d9534f;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #c9302c;
+            }
+        """)
+        self.clear_btn.clicked.connect(self.clear_display)
+
+        # 复制文本到系统剪贴板
+        self.copy_btn = QPushButton('复制日志', self)
+        self.copy_btn.setStyleSheet("""
+            QPushButton {
+                background: #337ab7;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #286090;
+            }
+        """)
+        self.copy_btn.clicked.connect(self.copy_log)
+
+        # 关闭日志视窗本身
+        self.close_btn = QPushButton('关闭视窗', self)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background: #777777;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #5e5e5e;
+            }
+        """)
+        self.close_btn.clicked.connect(self.close)
+
+        # 组装横向控制条，清空与复制靠左，关闭按钮紧靠右侧
+        toolbar.addWidget(self.clear_btn)
+        toolbar.addWidget(self.copy_btn)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.close_btn)
+
+        layout.addLayout(toolbar)
+
+    def _setup_timer(self) -> None:
+        '''
+        初始化高灵敏度 QTimer 以在打开期间进行秒级文件检测。
+        调用关系：由构造函数 __init__ 自动执行开启。
+        '''
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_timer_timeout)
+        self.timer.start(300)  # 每 300 毫秒高灵敏度扫描一次，兼顾实时性与低 CPU 开销
+
+    def clear_display(self) -> None:
+        '''仅清空当前文本框内容，不影响磁盘文件。由 self.clear_btn.clicked 信号触发。'''
+        self.log_edit.clear()
+
+    def copy_log(self) -> None:
+        '''将终端文本框中全部日志复制到系统剪贴板。由 self.copy_btn.clicked 信号触发。'''
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.log_edit.toPlainText())
+
+    def on_timer_timeout(self) -> None:
+        '''定时回调入口，触发下层实际的增量检测读取。由 self.timer.timeout 信号触发。'''
+        self.read_log_incremental(first_load=False)
+
+    def read_log_incremental(self, first_load: bool = False) -> None:
+        '''
+        高性能增量读取磁盘日志文件，并带有超大文件自动截断的内存防护。
+        参数:
+            first_load: 是否为新开窗口的首次读取，决定是否激活 50KB 截断保护。
+        调用关系：
+            1. 构造函数中首次执行（first_load=True）。
+            2. 定时器 timeout 周期性轮询执行（first_load=False）。
+        '''
+        if not os.path.exists(self.log_file_path):
+            return
+
+        try:
+            current_size = os.path.getsize(self.log_file_path)
+
+            # 物理文件截断重置保护：如果日志物理文件由于其他原因被删除或清空导致比已读指针还小，重置指针
+            if current_size < self._file_offset:
+                self._file_offset = 0
+                self.log_edit.appendPlainText(">>> 检测到日志物理文件被重建或截断，已重新从头部读取 <<<\n")
+
+            # 内存防护机制：如果是窗口首次加载，且历史日志已经过大，只读取末尾 50KB，杜绝一次性渲染大量文本引起 UI 卡死
+            if first_load and current_size > 51200:
+                self._file_offset = current_size - 51200
+                self.log_edit.appendPlainText(">>> 历史运行日志过大，已启动内存保护，仅显示最近 50KB 内容 <<<\n")
+
+            # 有新内容写入时才发生文件读取
+            if current_size > self._file_offset:
+                with open(self.log_file_path, 'rb') as f:
+                    f.seek(self._file_offset)  # 寻址到上次已读字节位置
+                    new_bytes = f.read(current_size - self._file_offset)
+                    self._file_offset = current_size  # 更新当前已读的最新文件指针
+
+                    if new_bytes:
+                        # 兼容处理解码，剔除 UTF-8 非法字节
+                        new_text = new_bytes.decode('utf-8', errors='ignore')
+                        # 通过正则消除 ANSI 颜色代码控制字符，将 \033[31m 还原为普通文字显示
+                        clean_text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', new_text)
+
+                        # 检测当前滚动条状态。若用户当前正在最底端，则插入后强制跟随滚动
+                        scrollbar = self.log_edit.verticalScrollBar()
+                        was_at_bottom = scrollbar.value() == scrollbar.maximum()
+
+                        self.log_edit.insertPlainText(clean_text)
+
+                        if was_at_bottom:
+                            scrollbar.setValue(scrollbar.maximum())
+
+        except Exception as err:
+            # 静默容错，将错误打印在日志文本中，防止其以致命 crash 形式爆出
+            self.log_edit.appendPlainText(f"[日志异常提示] 增量读取磁盘文件失败: {str(err)}\n")
+
+    def closeEvent(self, event) -> None:
+        '''
+        窗口关闭事件拦截。关闭视窗时必须显式停止轮询定时器，安全回收资源。
+        调用关系：由 Qt 窗口框架在窗口收到 close 请求时自动触发。
+        '''
+        self.timer.stop()
+        event.accept()
 
 
 class MusicdlGUI(QMainWindow):
@@ -269,6 +463,7 @@ class MusicdlGUI(QMainWindow):
         self.download_thread: QThread | None = None
         self.playlist_scan_thread: QThread | None = None
         self.music_client: musicdl.MusicClient | None = None
+        self.log_window: LogWindow | None = None
         self.slider_pressed = False
         self.current_play_file_path: str = ''
         self.playback_mode_index = 2
@@ -279,9 +474,21 @@ class MusicdlGUI(QMainWindow):
             'list_loop': '列表循环',
         }
         self.settings = QSettings('musicdl', 'musicdlgui')
-        self.download_dir = self.settings.value('download_dir', os.path.abspath('musicdl_outputs'), type=str)
+        # 检测用户是否曾手动修改过下载路径标识
+        # 调用关系：调用 self.settings.value() 获取布尔值标识
+        is_custom = self.settings.value('is_custom_download_dir', False, type=bool)
+        # 如果用户手动修改过，则加载自定义保存的路径；否则默认每次启动都加载 exe 同级或项目 dist 目录下的 musicdl_outputs
+        # 调用关系：根据 is_custom 分支决定调用 self.settings.value() 还是 get_default_work_dir()
+        if is_custom:
+            # 加载用户手动保存过的路径，备选为默认输出目录
+            # 调用关系：调用 self.settings.value() 并以 get_default_work_dir() 为缺省参数
+            self.download_dir = self.settings.value('download_dir', get_default_work_dir(), type=str)
+        else:
+            # 没有手动更改过路径，每次启动均自动绑定默认的 exe 同级（打包）或项目 dist（开发）下的 outputs 文件夹
+            # 调用关系：直接调用 get_default_work_dir() 解析绝对路径并赋值
+            self.download_dir = get_default_work_dir()
         self.filename_template = self.settings.value('filename_template', DEFAULT_FILENAME_TEMPLATE, type=str)
-        self.setWindowTitle('musicdl 桌面音乐下载器')
+        self.setWindowTitle('music 桌面音乐下载器')
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'icon.ico')))
         self.resize(1240, 760)
         self._setup_ui()
@@ -318,7 +525,7 @@ class MusicdlGUI(QMainWindow):
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(18, 14, 18, 14)
         title_box = QVBoxLayout()
-        title = QLabel('musicdl')
+        title = QLabel('freeMusic')
         title.setObjectName('AppTitle')
         subtitle = QLabel('搜索、下载与播放本地音乐')
         subtitle.setObjectName('AppSubtitle')
@@ -412,8 +619,12 @@ class MusicdlGUI(QMainWindow):
         self.open_dir_button = QPushButton('打开目录')
         self.open_dir_button.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
         self.open_dir_button.clicked.connect(self.choose_download_dir)
+        self.log_button = QPushButton('日志')
+        self.log_button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
+        self.log_button.clicked.connect(self.show_log_window)
         action_layout.addWidget(self.download_button)
         action_layout.addWidget(self.open_dir_button)
+        action_layout.addWidget(self.log_button)
         action_layout.addStretch(1)
 
         self.download_table = QTableWidget(0, 5)
@@ -668,13 +879,29 @@ class MusicdlGUI(QMainWindow):
 
     def choose_download_dir(self) -> None:
         '''弹出目录选择框并更新基础下载目录。'''
+        # 弹出系统原生目录选择框，让用户手动挑选新的音乐下载目标存储目录
+        # 调用关系：调用 QFileDialog.getExistingDirectory 阻塞等待用户选择目录
         directory = QFileDialog.getExistingDirectory(self, '选择下载目录', self.download_dir)
+        # 如果用户取消选择或路径为空，直接终止执行
         if not directory:
+            # 退出当前函数
             return
+        # 更新程序运行中的当前下载路径变量
         self.download_dir = directory
+        # 在界面输入框中呈现最新选择的物理绝对目录路径
+        # 调用关系：调用 self.download_dir_edit.setText 刷新文本内容
         self.download_dir_edit.setText(directory)
+        # 将用户新挑选的物理目录持久化保存到设置中
+        # 调用关系：调用 self.settings.setValue 写入键值 'download_dir'
         self.settings.setValue('download_dir', directory)
+        # 核心逻辑：标记用户确实“手动修改过”路径，确保后续重启不会被动态默认路径所覆盖
+        # 调用关系：调用 self.settings.setValue 写入键值 'is_custom_download_dir'
+        self.settings.setValue('is_custom_download_dir', True)
+        # 强行同步刷新设置内容至磁盘或注册表物理文件
+        # 调用关系：调用 self.settings.sync() 物理写入
         self.settings.sync()
+        # 底部状态栏展示最新操作详情
+        # 调用关系：调用 self.set_status() 显示中文通知
         self.set_status(f'下载目录已设置为：{directory}')
 
     def _autoload_existing_downloads(self) -> None:
@@ -705,16 +932,27 @@ class MusicdlGUI(QMainWindow):
         self.download_table.setRowCount(0)
         self.music_records = []
         self.set_status('正在启动搜索任务...', busy=True)
+        # 创建搜索专用后台线程
         self.search_thread = QThread(self)
+        # 创建搜索工作器实例
         self.search_worker = SearchWorker(keyword, sources, self.download_dir)
+        # 将工作器移至后台线程中运行
         self.search_worker.moveToThread(self.search_thread)
+        # 绑定线程启动信号与工作器的具体执行逻辑
         self.search_thread.started.connect(self.search_worker.run)
-        self.search_worker.status.connect(lambda text: self.set_status(text, busy=True))
+        # 绑定进度更新信号，由于是常规成员方法绑定，由 PyQt 自动进行 QueuedConnection，确保主线程安全更新
+        self.search_worker.status.connect(self._on_search_status)
+        # 绑定成功后的回调，自动确保主线程更新
         self.search_worker.finished.connect(self.on_search_finished)
+        # 绑定失败回调
         self.search_worker.failed.connect(self.on_search_failed)
+        # 当工作器成功或失败完成时，指示线程安全退出
         self.search_worker.finished.connect(self.search_thread.quit)
         self.search_worker.failed.connect(self.search_thread.quit)
+        # 线程完全结束后，通知 C++ 释放内存，并在主线程调用清理方法清空 Python 引用以防止野指针
         self.search_thread.finished.connect(self.search_thread.deleteLater)
+        self.search_thread.finished.connect(self._cleanup_search_thread)
+        # 启动线程
         self.search_thread.start()
 
     def on_search_finished(self, client: musicdl.MusicClient, results: dict[str, list[SongInfo]]) -> None:
@@ -776,16 +1014,27 @@ class MusicdlGUI(QMainWindow):
         self.download_button.setEnabled(False)
         self.set_status('正在启动下载任务...', busy=True)
         self.append_download_rows(song_infos, '下载中')
+        # 创建下载专用后台线程
         self.download_thread = QThread(self)
+        # 创建下载工作器实例
         self.download_worker = DownloadWorker(song_infos, keyword, sources, self.download_dir, template)
+        # 将工作器移至后台线程中运行
         self.download_worker.moveToThread(self.download_thread)
+        # 绑定线程启动信号与工作器的下载逻辑
         self.download_thread.started.connect(self.download_worker.run)
-        self.download_worker.status.connect(lambda text: self.set_status(text, busy=True))
+        # 绑定下载状态通知信号，通过普通方法绑定实现队列化跨线程主线程状态更新
+        self.download_worker.status.connect(self._on_download_status)
+        # 绑定下载成功后的处理方法
         self.download_worker.finished.connect(self.on_download_finished)
+        # 绑定下载失败异常的回调方法
         self.download_worker.failed.connect(self.on_download_failed)
+        # 当工作完成或失败时，退让并通知下载线程退出事件循环
         self.download_worker.finished.connect(self.download_thread.quit)
         self.download_worker.failed.connect(self.download_thread.quit)
+        # 线程彻底停止后，清空 C++ 物理内存，并利用主线程清理逻辑抹除 Python 的悬空引用
         self.download_thread.finished.connect(self.download_thread.deleteLater)
+        self.download_thread.finished.connect(self._cleanup_download_thread)
+        # 启动线程
         self.download_thread.start()
 
     def append_download_rows(self, song_infos: list[SongInfo], status: str) -> None:
@@ -865,14 +1114,66 @@ class MusicdlGUI(QMainWindow):
         self.settings.sync()
 
     def load_download_records(self) -> None:
-        '''从 QSettings 加载历史下载记录到下载记录表。'''
+        '''从 QSettings 加载历史下载记录到下载记录表，使用批量插入减少重绘。'''
+        # 从 QSettings 读取历史记录列表
         records = self.settings.value('download_records', [], type=list)
+        valid_records = []
+        was_migrated = False  # 是否发生过路径修正，用于决定是否回写 settings
+        
         for record in records:
             save_path = stringify(record.get('save_path', ''))
-            if not save_path or not os.path.exists(save_path):
+            if not save_path:
                 continue
-            row = self.download_table.rowCount()
-            self.download_table.insertRow(row)
+
+            # 核心策略：只要路径中含有 'musicdl_outputs' 特征目录，
+            # 不论旧路径文件是否存在，都优先基于当前活跃的 self.download_dir 重新计算路径。
+            # 这样可确保表格始终展示当前 exe 所在运行环境下的实际输出目录路径。
+            # 调用关系：调用 split 截取 'musicdl_outputs' 之后的相对路径尾部
+            if 'musicdl_outputs' in save_path:
+                # 截取 'musicdl_outputs' 之后的歌曲相对分类路径，例如 'KuwoMusicClient\xxx.mp3'
+                # 调用关系：调用 split + lstrip 清理路径前缀的斜杠或反斜杠
+                relative_tail = save_path.split('musicdl_outputs', 1)[1].lstrip('\\/')
+                # 基于当前运行的默认下载目录重新拼接绝对路径
+                # 调用关系：调用 os.path.join 进行跨平台路径拼接
+                remapped_path = os.path.abspath(os.path.join(self.download_dir, relative_tail))
+                
+                if os.path.exists(remapped_path):
+                    # 重映射后的路径文件存在，优先使用新路径
+                    if remapped_path != save_path:
+                        # 路径发生了变化，记录需要回写 settings
+                        record['save_path'] = remapped_path
+                        was_migrated = True
+                    save_path = remapped_path
+                elif os.path.exists(save_path):
+                    # 重映射后的路径文件不存在，但旧路径文件存在，使用旧路径（不替换显示）
+                    pass
+                else:
+                    # 两个路径均不存在，跳过该记录
+                    continue
+            else:
+                # 路径中没有 'musicdl_outputs' 特征（用户完全自定义目录），
+                # 按原路径是否存在决定是否展示
+                if not os.path.exists(save_path):
+                    continue
+
+            valid_records.append(record)
+
+        # 若发生了路径自愈修正，立即回写 settings 以持久化新路径
+        # 调用关系：调用 self.settings.setValue 写入，调用 self.settings.sync() 刷入磁盘
+        if was_migrated:
+            self.settings.setValue('download_records', records)
+            self.settings.sync()
+
+        if not valid_records:
+            return
+
+        self.download_table.blockSignals(True)
+        self.download_table.setUpdatesEnabled(False)
+        start_row = self.download_table.rowCount()
+        self.download_table.setRowCount(start_row + len(valid_records))
+        for i, record in enumerate(valid_records):
+            row = start_row + i
+            save_path = stringify(record.get('save_path', ''))
             values = [
                 stringify(record.get('song_name', Path(save_path).stem)),
                 stringify(record.get('singers', '')),
@@ -885,6 +1186,8 @@ class MusicdlGUI(QMainWindow):
                 item.setToolTip(stringify(value, ''))
                 item.setData(Qt.UserRole, save_path)
                 self.download_table.setItem(row, column, item)
+        self.download_table.setUpdatesEnabled(True)
+        self.download_table.blockSignals(False)
 
     def open_download_menu(self, position) -> None:
         '''显示下载记录右键菜单，支持删除记录。'''
@@ -999,19 +1302,53 @@ class MusicdlGUI(QMainWindow):
 
     def _scan_playlist_files(self, autoload: bool) -> None:
         '''启动后台线程扫描音频文件，并在完成后批量加入播放列表和下载记录。'''
+        # 核心逻辑：若前次线程正在运转，直接阻断新运行，保护线程环境不被篡改
         if self.playlist_scan_thread and self.playlist_scan_thread.isRunning():
             return
         self.set_status('正在扫描本地音乐...', busy=True)
+        # 实例化后台子线程，设置当前主类实例为父对象
         self.playlist_scan_thread = QThread(self)
-        self.playlist_scan_worker = PlaylistScanWorker(self.download_dir)
+        # 实例化扫描工作器，显式将 autoload 变量作为状态成员传参给工作器保存，代替 lambda 闭包作用域
+        self.playlist_scan_worker = PlaylistScanWorker(self.download_dir, autoload)
+        # 将工作器移至后台线程中运行
         self.playlist_scan_worker.moveToThread(self.playlist_scan_thread)
+        # 连接线程的启动信号与工作器的执行逻辑
         self.playlist_scan_thread.started.connect(self.playlist_scan_worker.run)
-        self.playlist_scan_worker.finished.connect(lambda files: self._on_playlist_scan_finished(files, autoload))
+        # 去除原 lambda 直接连接，绑定普通成员方法使其以 QueuedConnection 方式在主线程中安全回调
+        self.playlist_scan_worker.finished.connect(self._on_playlist_scan_finished)
+        # 连接失败异常回调
         self.playlist_scan_worker.failed.connect(self._on_playlist_scan_failed)
+        # 扫描顺利完工或失败时，皆促使子线程退出事件循环
         self.playlist_scan_worker.finished.connect(self.playlist_scan_thread.quit)
         self.playlist_scan_worker.failed.connect(self.playlist_scan_thread.quit)
+        # 线程运行生命周期圆满结束后，自动回收底层 C++ 对象，并在主线程把 Python 引用置空为 None 规避下一次点击的野指针闪退
         self.playlist_scan_thread.finished.connect(self.playlist_scan_thread.deleteLater)
+        self.playlist_scan_thread.finished.connect(self._cleanup_playlist_scan_thread)
+        # 启动后台线程执行
         self.playlist_scan_thread.start()
+
+    def _cleanup_search_thread(self) -> None:
+        '''在主线程安全清理搜索线程和工作器引用，避免下一次调用或程序关闭时造成野指针崩溃。'''
+        self.search_thread = None
+        self.search_worker = None
+
+    def _cleanup_download_thread(self) -> None:
+        '''在主线程安全清理下载线程和工作器引用，避免下一次调用或程序关闭时造成野指针崩溃。'''
+        self.download_thread = None
+        self.download_worker = None
+
+    def _cleanup_playlist_scan_thread(self) -> None:
+        '''在主线程安全清理扫描线程和工作器引用，避免下一次调用或程序关闭时造成野指针崩溃。'''
+        self.playlist_scan_thread = None
+        self.playlist_scan_worker = None
+
+    def _on_search_status(self, text: str) -> None:
+        '''在主线程安全更新搜索进度文本与状态栏。'''
+        self.set_status(text, busy=True)
+
+    def _on_download_status(self, text: str) -> None:
+        '''在主线程安全更新下载进度文本与状态栏。'''
+        self.set_status(text, busy=True)
 
     def _on_playlist_scan_finished(self, files: list[str], autoload: bool) -> None:
         '''处理扫描结果并将音频加入播放列表和下载记录。'''
@@ -1167,8 +1504,8 @@ class MusicdlGUI(QMainWindow):
             self.player.stop()
         self.player.setPlaylist(None)
 
-    def shutdown_thread(self, thread: QThread | None, timeout_ms: int = 80) -> None:
-        '''请求后台线程退出，短暂等待后强制终止，避免关闭窗口长时间卡顿。'''
+    def shutdown_thread(self, thread: QThread | None, timeout_ms: int = 2000) -> None:
+        '''请求后台线程退出并等待自然结束，超时后再强制终止。'''
         if not thread or not thread.isRunning():
             return
         thread.requestInterruption()
@@ -1176,18 +1513,51 @@ class MusicdlGUI(QMainWindow):
         if thread.wait(timeout_ms):
             return
         thread.terminate()
-        thread.wait(timeout_ms)
+        thread.wait(500)
+
+    def show_log_window(self) -> None:
+        '''
+        非模态弹出并置顶展示日志视窗，如果尚未实例化则新建并执行信号绑定。
+        调用关系：由顶部/中部的“日志”按钮点击信号触发。
+        '''
+        if self.log_window is None:
+            self.log_window = LogWindow()
+            # 绑定销毁信号。当 LogWindow 收到 close 销毁自身时，将 self.log_window 置为 None，防 Python 野指针崩溃
+            self.log_window.destroyed.connect(self._on_log_window_destroyed)
+        self.log_window.show()
+        self.log_window.raise_()
+        self.log_window.activateWindow()
+        self.set_status('已打开系统运行日志视窗')
+
+    def _on_log_window_destroyed(self) -> None:
+        '''
+        当日志窗口由于 close 自动被销毁时，重置本地悬空引用为 None。
+        调用关系：由 self.log_window.destroyed 信号触发。
+        '''
+        self.log_window = None
 
     def closeEvent(self, event) -> None:
-        '''关闭窗口时停止后台线程和播放器。'''
+        '''关闭窗口时先隐藏界面、释放播放器、等待事件循环处理异步资源，再停止后台线程并保存设置。'''
         self.hide()
+        # 清爽退出机制：如果日志视窗当前仍开启，一并将其安全关闭释放定时器，确保没有孤儿窗口或悬挂线程运行
+        if self.log_window is not None:
+            self.log_window.close()
         self.shutdown_player()
+        QApplication.processEvents()
+        self.save_download_records()
+        self.settings.sync()
         for thread in [self.search_thread, self.download_thread, self.playlist_scan_thread]:
             self.shutdown_thread(thread)
+        event.accept()
         super().closeEvent(event)
 
 
 if __name__ == '__main__':
+    # 针对 Windows 系统设置独立的 AppUserModelID，以确保任务栏图标能正确加载我们的自定义 icon，而不是显示默认 python 图标。
+    if sys.platform.startswith('win'):
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('musicdl.musicdlgui.1.0')
+
     app = QApplication(sys.argv)
     gui = MusicdlGUI()
     gui.show()
